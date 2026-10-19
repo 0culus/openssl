@@ -1,10 +1,17 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2012-2025 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 #
 # ====================================================================
-# Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
+# Written by Andy Polyakov, @dot-asm, initially for use in the OpenSSL
 # project. The module is, however, dual licensed under OpenSSL and
 # CRYPTOGAMS licenses depending on where you obtain it. For further
-# details see http://www.openssl.org/~appro/cryptogams/.
+# details see https://github.com/dot-asm/cryptogams/.
 # ====================================================================
 #
 # SHA512 for C64x+.
@@ -22,8 +29,7 @@
 # service routines are expected to preserve it and for own well-being
 # zero it upon entry.
 
-while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {}
-open STDOUT,">$output";
+($output = pop) =~ m|\.\w+$| and open STDOUT,">$output";
 
 ($CTXA,$INP,$NUM) = ("A4","B4","A6");            # arguments
  $K512="A3";
@@ -46,6 +52,10 @@ open STDOUT,">$output";
 
 $code.=<<___;
 	.text
+
+	.if	.ASSEMBLER_VERSION<7000000
+	.asg	0,__TI_EABI__
+	.endif
 	.if	__TI_EABI__
 	.nocmp
 	.asg	sha512_block_data_order,_sha512_block_data_order
@@ -65,6 +75,7 @@ $code.=<<___;
 
 	.global	_sha512_block_data_order
 _sha512_block_data_order:
+__sha512_block:
 	.asmfunc stack_usage(40+128)
 	MV	$NUM,A0				; reassign $NUM
 ||	MVK	-128,B0
@@ -81,15 +92,15 @@ _sha512_block_data_order:
 || [A0]	ADD	B0,SP,SP			; alloca(128)
 	.if	__TI_EABI__
    [A0]	AND	B0,SP,SP			; align stack at 128 bytes
-|| [A0]	ADDKPC	_sha512_block_data_order,B1
-|| [A0]	MVKL	\$PCR_OFFSET(K512,_sha512_block_data_order),$K512
-   [A0]	MVKH	\$PCR_OFFSET(K512,_sha512_block_data_order),$K512
+|| [A0]	ADDKPC	__sha512_block,B1
+|| [A0]	MVKL	\$PCR_OFFSET(K512,__sha512_block),$K512
+   [A0]	MVKH	\$PCR_OFFSET(K512,__sha512_block),$K512
 || [A0]	SUBAW	SP,2,SP				; reserve two words above buffer
 	.else
    [A0]	AND	B0,SP,SP			; align stack at 128 bytes
-|| [A0]	ADDKPC	_sha512_block_data_order,B1
-|| [A0]	MVKL	(K512-_sha512_block_data_order),$K512
-   [A0]	MVKH	(K512-_sha512_block_data_order),$K512
+|| [A0]	ADDKPC	__sha512_block,B1
+|| [A0]	MVKL	(K512-__sha512_block),$K512
+   [A0]	MVKH	(K512-__sha512_block),$K512
 || [A0]	SUBAW	SP,2,SP				; reserve two words above buffer
 	.endif
 	ADDAW	SP,3,$Xilo
@@ -418,9 +429,9 @@ K512:
 	.uword	0x3c9ebe0a,0x15c9bebc, 0x431d67c4,0x9c100d4c
 	.uword	0x4cc5d4be,0xcb3e42b6, 0x597f299c,0xfc657e2a
 	.uword	0x5fcb6fab,0x3ad6faec, 0x6c44198c,0x4a475817
-	.cstring "SHA512 block transform for C64x+, CRYPTOGAMS by <appro\@openssl.org>"
+	.cstring "SHA512 block transform for C64x+, CRYPTOGAMS by <https://github.com/dot-asm>"
 	.align	4
 ___
 
 print $code;
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

@@ -1,11 +1,13 @@
-#!/usr/bin/perl -w
-#
-# MD5 optimized for AMD64.
-#
+#! /usr/bin/env perl
 # Author: Marc Bevand <bevand_m (at) epita.fr>
-# Licence: I hereby disclaim the copyright on this code and place it
-# in the public domain.
+# Copyright 2005-2025 The OpenSSL Project Authors. All Rights Reserved.
 #
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+# MD5 optimized for AMD64.
 
 use strict;
 
@@ -39,7 +41,6 @@ EOF
 #   %r10d = X[k_next]
 #   %r11d = z' (copy of z for the next step)
 #   %r12d = z' (copy of z for the next step)
-# Each round2_step() takes about 5.4 clocks (11 instructions, 2.0 IPC)
 sub round2_step
 {
     my ($pos, $dst, $x, $y, $z, $k_next, $T_i, $s) = @_;
@@ -47,13 +48,13 @@ sub round2_step
     $code .= " mov	%edx,		%r12d		/* (NEXT STEP) z' = %edx */\n" if ($pos == -1);
     $code .= <<EOF;
 	not	%r11d				/* not z */
-	lea	$T_i($dst,%r10d),$dst		/* Const + dst + ... */
 	and	$x,		%r12d		/* x & z */
+	lea	$T_i($dst,%r10d),$dst		/* Const + dst + ... */
 	and	$y,		%r11d		/* y & (not z) */
 	mov	$k_next*4(%rsi),%r10d		/* (NEXT STEP) X[$k_next] */
-	or	%r11d,		%r12d		/* (y & (not z)) | (x & z) */
+	add	%r11d,		$dst		/* dst += (y & (not z)) */
 	mov	$y,		%r11d		/* (NEXT STEP) z' = $y */
-	add	%r12d,		$dst		/* dst += ... */
+	add	%r12d,		$dst		/* dst += (x & z) */
 	mov	$y,		%r12d		/* (NEXT STEP) z' = $y */
 	rol	\$$s,		$dst		/* dst <<< s */
 	add	$x,		$dst		/* dst += x */
@@ -65,6 +66,7 @@ EOF
 #   %r10d = X[k_next]
 #   %r11d = y' (copy of y for the next step)
 # Each round3_step() takes about 4.2 clocks (8 instructions, 1.9 IPC)
+{ my $round3_alter=0;
 sub round3_step
 {
     my ($pos, $dst, $x, $y, $z, $k_next, $T_i, $s) = @_;
@@ -75,10 +77,20 @@ sub round3_step
 	mov	$k_next*4(%rsi),%r10d		/* (NEXT STEP) X[$k_next] */
 	xor	$x,		%r11d		/* x ^ ... */
 	add	%r11d,		$dst		/* dst += ... */
+EOF
+    $code .= <<EOF if ($round3_alter);
 	rol	\$$s,		$dst		/* dst <<< s */
 	mov	$x,		%r11d		/* (NEXT STEP) y' = $x */
+EOF
+    $code .= <<EOF if (!$round3_alter);
+	mov	$x,		%r11d		/* (NEXT STEP) y' = $x */
+	rol	\$$s,		$dst		/* dst <<< s */
+EOF
+    $code .= <<EOF;
 	add	$x,		$dst		/* dst += x */
 EOF
+    $round3_alter^=1;
+}
 }
 
 # round4_step() does:
@@ -105,9 +117,11 @@ sub round4_step
 EOF
 }
 
-my $flavour = shift;
-my $output  = shift;
-if ($flavour =~ /\./) { $output = $flavour; undef $flavour; }
+no warnings qw(uninitialized);
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+my $output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+my $flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 my $win64=0; $win64=1 if ($flavour =~ /[nm]asm|mingw64/ || $output =~ /\.asm$/);
 
@@ -116,22 +130,28 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; my $dir=$1; my $xlate;
 ( $xlate="${dir}../../perlasm/x86_64-xlate.pl" and -f $xlate) or
 die "can't locate x86_64-xlate.pl";
 
-no warnings qw(uninitialized);
-open OUT,"| \"$^X\" $xlate $flavour $output";
+open OUT,"| \"$^X\" \"$xlate\" $flavour \"$output\""
+    or die "can't call $xlate: $!";
 *STDOUT=*OUT;
 
 $code .= <<EOF;
 .text
 .align 16
 
-.globl md5_block_asm_data_order
-.type md5_block_asm_data_order,\@function,3
-md5_block_asm_data_order:
+.globl ossl_md5_block_asm_data_order
+.type ossl_md5_block_asm_data_order,\@function,3
+ossl_md5_block_asm_data_order:
+.cfi_startproc
 	push	%rbp
+.cfi_push	%rbp
 	push	%rbx
+.cfi_push	%rbx
 	push	%r12
+.cfi_push	%r12
 	push	%r14
+.cfi_push	%r14
 	push	%r15
+.cfi_push	%r15
 .Lprologue:
 
 	# rdi = arg #1 (ctx, MD5_CTX pointer)
@@ -248,14 +268,21 @@ $code .= <<EOF;
 	mov	%edx,		3*4(%rbp)	# ctx->D = D
 
 	mov	(%rsp),%r15
+.cfi_restore	%r15
 	mov	8(%rsp),%r14
+.cfi_restore	%r14
 	mov	16(%rsp),%r12
+.cfi_restore	%r12
 	mov	24(%rsp),%rbx
+.cfi_restore	%rbx
 	mov	32(%rsp),%rbp
+.cfi_restore	%rbp
 	add	\$40,%rsp
+.cfi_adjust_cfa_offset	-40
 .Lepilogue:
 	ret
-.size md5_block_asm_data_order,.-md5_block_asm_data_order
+.cfi_endproc
+.size ossl_md5_block_asm_data_order,.-ossl_md5_block_asm_data_order
 EOF
 
 # EXCEPTION_DISPOSITION handler (EXCEPTION_RECORD *rec,ULONG64 frame,
@@ -350,13 +377,13 @@ se_handler:
 
 .section	.pdata
 .align	4
-	.rva	.LSEH_begin_md5_block_asm_data_order
-	.rva	.LSEH_end_md5_block_asm_data_order
-	.rva	.LSEH_info_md5_block_asm_data_order
+	.rva	.LSEH_begin_ossl_md5_block_asm_data_order
+	.rva	.LSEH_end_ossl_md5_block_asm_data_order
+	.rva	.LSEH_info_ossl_md5_block_asm_data_order
 
 .section	.xdata
 .align	8
-.LSEH_info_md5_block_asm_data_order:
+.LSEH_info_ossl_md5_block_asm_data_order:
 	.byte	9,0,0,0
 	.rva	se_handler
 ___
@@ -364,4 +391,4 @@ ___
 
 print $code;
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

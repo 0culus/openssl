@@ -1,10 +1,17 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 1998-2026 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
-# [Re]written by Andy Polyakov <appro@openssl.org> for the OpenSSL
+# [Re]written by Andy Polyakov <https://github.com/dot-asm> for the OpenSSL
 # project. The module is, however, dual licensed under OpenSSL and
 # CRYPTOGAMS licenses depending on where you obtain it. For further
-# details see http://www.openssl.org/~appro/cryptogams/.
+# details see https://github.com/dot-asm/cryptogams/.
 # ====================================================================
 
 # "[Re]written" was achieved in two major overhauls. In 2004 BODY_*
@@ -28,10 +35,9 @@
 # P4		+85%(!)			+45%
 #
 # As you can see Pentium came out as looser:-( Yet I reckoned that
-# improvement on P4 outweights the loss and incorporate this
+# improvement on P4 outweighs the loss and incorporate this
 # re-tuned code to 0.9.7 and later.
 # ----------------------------------------------------------------
-#					<appro@fy.chalmers.se>
 
 # August 2009.
 #
@@ -66,9 +72,9 @@
 # switch to AVX alone improves performance by as little as 4% in
 # comparison to SSSE3 code path. But below result doesn't look like
 # 4% improvement... Trouble is that Sandy Bridge decodes 'ro[rl]' as
-# pair of µ-ops, and it's the additional µ-ops, two per round, that
+# pair of Âµ-ops, and it's the additional Âµ-ops, two per round, that
 # make it run slower than Core2 and Westmere. But 'sh[rl]d' is decoded
-# as single µ-op by Sandy Bridge and it's replacing 'ro[rl]' with
+# as single Âµ-op by Sandy Bridge and it's replacing 'ro[rl]' with
 # equivalent 'sh[rl]d' that is responsible for the impressive 5.1
 # cycles per processed byte. But 'sh[rl]d' is not something that used
 # to be fast, nor does it appear to be fast in upcoming Bulldozer
@@ -78,6 +84,10 @@
 # makes no sense to keep the AVX code path. If somebody feels that
 # strongly, it's probably more appropriate to discuss possibility of
 # using vector rotate XOP on AMD...
+
+# March 2014.
+#
+# Add support for Intel SHA Extensions.
 
 ######################################################################
 # Current performance is summarized in following table. Numbers are
@@ -89,24 +99,33 @@
 # P4		10.6		-
 # AMD K8	7.1		-
 # Core2		7.3		6.0/+22%	-
-# Atom		12.5		9.3(*)/+35%	-
 # Westmere	7.3		5.5/+33%	-
 # Sandy Bridge	8.8		6.2/+40%	5.1(**)/+73%
 # Ivy Bridge	7.2		4.8/+51%	4.7(**)/+53%
 # Haswell	6.5		4.3/+51%	4.1(**)/+58%
+# Skylake	6.4		4.1/+55%	4.1(**)/+55%
 # Bulldozer	11.6		6.0/+92%
 # VIA Nano	10.6		7.5/+41%
+# Atom		12.5		9.3(*)/+35%
+# Silvermont	14.5		9.9(*)/+46%
+# Goldmont	8.8		6.7/+30%	1.7(***)/+415%
 #
 # (*)	Loop is 1056 instructions long and expected result is ~8.25.
-#	It remains mystery [to me] why ILP is limited to 1.7.
+#	The discrepancy is because of front-end limitations, so
+#	called MS-ROM penalties, and on Silvermont even rotate's
+#	limited parallelism.
 #
 # (**)	As per above comment, the result is for AVX *plus* sh[rl]d.
+#
+# (***)	SHAEXT result
 
 $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-&asm_init($ARGV[0],"sha1-586.pl",$ARGV[$#ARGV] eq "386");
+$output=pop and open STDOUT,">$output";
+
+&asm_init($ARGV[0],$ARGV[$#ARGV] eq "386");
 
 $xmm=$ymm=0;
 for (@ARGV) { $xmm=1 if (/-DOPENSSL_IA32_SSE2/); }
@@ -116,13 +135,21 @@ $ymm=1 if ($xmm &&
 			=~ /GNU assembler version ([2-9]\.[0-9]+)/ &&
 		$1>=2.19);	# first version supporting AVX
 
-$ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32n" && 
+$ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32n" &&
 		`nasm -v 2>&1` =~ /NASM version ([2-9]\.[0-9]+)/ &&
 		$1>=2.03);	# first version supporting AVX
 
 $ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32" &&
 		`ml 2>&1` =~ /Version ([0-9]+)\./ &&
 		$1>=10);	# first version supporting AVX
+
+$ymm=1 if ($xmm && !$ymm && `$ENV{CC} -v 2>&1` =~ /((?:clang|LLVM) version|based on LLVM) ([0-9]+\.[0-9]+)/ &&
+		$2>=3.0);	# first version supporting AVX
+
+$ymm=1 if ($xmm && !$ymm && `$ENV{CC} -x c /dev/null -dM -E|grep __clang_major__` =~ /#define __clang_major__.([0-9]+)/ &&
+		$1>=11); #icx started with clang 11
+
+$shaext=$xmm;	### set to zero if compiling for 1.0.1
 
 &external_label("OPENSSL_ia32cap_P") if ($xmm);
 
@@ -303,6 +330,7 @@ if ($alt) {
 
 &function_begin("sha1_block_data_order");
 if ($xmm) {
+  &static_label("shaext_shortcut")	if ($shaext);
   &static_label("ssse3_shortcut");
   &static_label("avx_shortcut")		if ($ymm);
   &static_label("K_XX_XX");
@@ -317,8 +345,13 @@ if ($xmm) {
 	&mov	($D,&DWP(4,$T));
 	&test	($D,1<<9);		# check SSSE3 bit
 	&jz	(&label("x86"));
+	&mov	($C,&DWP(8,$T));
 	&test	($A,1<<24);		# check FXSR bit
 	&jz	(&label("x86"));
+	if ($shaext) {
+		&test	($C,1<<29);		# check SHA bit
+		&jnz	(&label("shaext_shortcut"));
+	}
 	if ($ymm) {
 		&and	($D,1<<28);		# mask AVX bit
 		&and	($A,1<<30);		# mask "Intel CPU" bit
@@ -397,6 +430,117 @@ if ($xmm) {
 &function_end("sha1_block_data_order");
 
 if ($xmm) {
+if ($shaext) {
+######################################################################
+# Intel SHA Extensions implementation of SHA1 update function.
+#
+my ($ctx,$inp,$num)=("edi","esi","ecx");
+my ($ABCD,$E,$E_,$BSWAP)=map("xmm$_",(0..3));
+my @MSG=map("xmm$_",(4..7));
+
+sub sha1rnds4 {
+ my ($dst,$src,$imm)=@_;
+    if ("$dst:$src" =~ /xmm([0-7]):xmm([0-7])/)
+    {	&data_byte(0x0f,0x3a,0xcc,0xc0|($1<<3)|$2,$imm);	}
+}
+sub sha1op38 {
+ my ($opcodelet,$dst,$src)=@_;
+    if ("$dst:$src" =~ /xmm([0-7]):xmm([0-7])/)
+    {	&data_byte(0x0f,0x38,$opcodelet,0xc0|($1<<3)|$2);	}
+}
+sub sha1nexte	{ sha1op38(0xc8,@_); }
+sub sha1msg1	{ sha1op38(0xc9,@_); }
+sub sha1msg2	{ sha1op38(0xca,@_); }
+
+&function_begin("_sha1_block_data_order_shaext");
+	&call	(&label("pic_point"));	# make it PIC!
+	&set_label("pic_point");
+	&blindpop($tmp1);
+	&lea	($tmp1,&DWP(&label("K_XX_XX")."-".&label("pic_point"),$tmp1));
+&set_label("shaext_shortcut");
+	&mov	($ctx,&wparam(0));
+	&mov	("ebx","esp");
+	&mov	($inp,&wparam(1));
+	&mov	($num,&wparam(2));
+	&sub	("esp",32);
+
+	&movdqu	($ABCD,&QWP(0,$ctx));
+	&movd	($E,&DWP(16,$ctx));
+	&and	("esp",-32);
+	&movdqa	($BSWAP,&QWP(0x50,$tmp1));	# byte-n-word swap
+
+	&movdqu	(@MSG[0],&QWP(0,$inp));
+	&pshufd	($ABCD,$ABCD,0b00011011);	# flip word order
+	&movdqu	(@MSG[1],&QWP(0x10,$inp));
+	&pshufd	($E,$E,0b00011011);		# flip word order
+	&movdqu	(@MSG[2],&QWP(0x20,$inp));
+	&pshufb	(@MSG[0],$BSWAP);
+	&movdqu	(@MSG[3],&QWP(0x30,$inp));
+	&pshufb	(@MSG[1],$BSWAP);
+	&pshufb	(@MSG[2],$BSWAP);
+	&pshufb	(@MSG[3],$BSWAP);
+	&jmp	(&label("loop_shaext"));
+
+&set_label("loop_shaext",16);
+	&dec		($num);
+	&lea		("eax",&DWP(0x40,$inp));
+	&movdqa		(&QWP(0,"esp"),$E);	# offload $E
+	&paddd		($E,@MSG[0]);
+	&cmovne		($inp,"eax");
+	&movdqa		(&QWP(16,"esp"),$ABCD);	# offload $ABCD
+
+for($i=0;$i<20-4;$i+=2) {
+	&sha1msg1	(@MSG[0],@MSG[1]);
+	&movdqa		($E_,$ABCD);
+	&sha1rnds4	($ABCD,$E,int($i/5));	# 0-3...
+	&sha1nexte	($E_,@MSG[1]);
+	&pxor		(@MSG[0],@MSG[2]);
+	&sha1msg1	(@MSG[1],@MSG[2]);
+	&sha1msg2	(@MSG[0],@MSG[3]);
+
+	&movdqa		($E,$ABCD);
+	&sha1rnds4	($ABCD,$E_,int(($i+1)/5));
+	&sha1nexte	($E,@MSG[2]);
+	&pxor		(@MSG[1],@MSG[3]);
+	&sha1msg2	(@MSG[1],@MSG[0]);
+
+	push(@MSG,shift(@MSG));	push(@MSG,shift(@MSG));
+}
+	&movdqu		(@MSG[0],&QWP(0,$inp));
+	&movdqa		($E_,$ABCD);
+	&sha1rnds4	($ABCD,$E,3);		# 64-67
+	&sha1nexte	($E_,@MSG[1]);
+	&movdqu		(@MSG[1],&QWP(0x10,$inp));
+	&pshufb		(@MSG[0],$BSWAP);
+
+	&movdqa		($E,$ABCD);
+	&sha1rnds4	($ABCD,$E_,3);		# 68-71
+	&sha1nexte	($E,@MSG[2]);
+	&movdqu		(@MSG[2],&QWP(0x20,$inp));
+	&pshufb		(@MSG[1],$BSWAP);
+
+	&movdqa		($E_,$ABCD);
+	&sha1rnds4	($ABCD,$E,3);		# 72-75
+	&sha1nexte	($E_,@MSG[3]);
+	&movdqu		(@MSG[3],&QWP(0x30,$inp));
+	&pshufb		(@MSG[2],$BSWAP);
+
+	&movdqa		($E,$ABCD);
+	&sha1rnds4	($ABCD,$E_,3);		# 76-79
+	&movdqa		($E_,&QWP(0,"esp"));
+	&pshufb		(@MSG[3],$BSWAP);
+	&sha1nexte	($E,$E_);
+	&paddd		($ABCD,&QWP(16,"esp"));
+
+	&jnz		(&label("loop_shaext"));
+
+	&pshufd	($ABCD,$ABCD,0b00011011);
+	&pshufd	($E,$E,0b00011011);
+	&movdqu	(&QWP(0,$ctx),$ABCD)
+	&movd	(&DWP(16,$ctx),$E);
+	&mov	("esp","ebx");
+&function_end("_sha1_block_data_order_shaext");
+}
 ######################################################################
 # The SSSE3 implementation.
 #
@@ -407,7 +551,7 @@ if ($xmm) {
 # being implemented in SSSE3). Once 8 quadruples or 32 elements are
 # collected, it switches to routine proposed by Max Locktyukhin.
 #
-# Calculations inevitably require temporary reqisters, and there are
+# Calculations inevitably require temporary registers, and there are
 # no %xmm registers left to spare. For this reason part of the ring
 # buffer, X[2..4] to be specific, is offloaded to 3 quadriples ring
 # buffer on the stack. Keep in mind that X[2] is alias X[-6], X[3] -
@@ -518,7 +662,7 @@ my $_ror=sub { &ror(@_) };
 	&jmp	(&label("loop"));
 
 ######################################################################
-# SSE instruction sequence is first broken to groups of indepentent
+# SSE instruction sequence is first broken to groups of independent
 # instructions, independent in respect to their inputs and shifter
 # (not all architectures have more than one). Then IALU instructions
 # are "knitted in" between the SSE groups. Distance is maintained for
@@ -527,14 +671,14 @@ my $_ror=sub { &ror(@_) };
 #
 # Temporary registers usage. X[2] is volatile at the entry and at the
 # end is restored from backtrace ring buffer. X[3] is expected to
-# contain current K_XX_XX constant and is used to caclulate X[-1]+K
+# contain current K_XX_XX constant and is used to calculate X[-1]+K
 # from previous round, it becomes volatile the moment the value is
 # saved to stack for transfer to IALU. X[4] becomes volatile whenever
 # X[-4] is accumulated and offloaded to backtrace ring buffer, at the
 # end it is loaded with next K_XX_XX [which becomes X[3] in next
 # round]...
 #
-sub Xupdate_ssse3_16_31()		# recall that $Xi starts wtih 4
+sub Xupdate_ssse3_16_31()		# recall that $Xi starts with 4
 { use integer;
   my $body = shift;
   my @insns = (&$body,&$body,&$body,&$body);	# 40 instructions
@@ -1057,7 +1201,7 @@ my $_ror=sub { &shrd(@_[0],@_) };
 	&and	(@T[0],@T[1]);
 	&jmp	(&label("loop"));
 
-sub Xupdate_avx_16_31()		# recall that $Xi starts wtih 4
+sub Xupdate_avx_16_31()		# recall that $Xi starts with 4
 { use integer;
   my $body = shift;
   my @insns = (&$body,&$body,&$body,&$body);	# 40 instructions
@@ -1340,7 +1484,10 @@ sub Xtail_avx()
 &data_word(0x8f1bbcdc,0x8f1bbcdc,0x8f1bbcdc,0x8f1bbcdc);	# K_40_59
 &data_word(0xca62c1d6,0xca62c1d6,0xca62c1d6,0xca62c1d6);	# K_60_79
 &data_word(0x00010203,0x04050607,0x08090a0b,0x0c0d0e0f);	# pbswap mask
+&data_byte(0xf,0xe,0xd,0xc,0xb,0xa,0x9,0x8,0x7,0x6,0x5,0x4,0x3,0x2,0x1,0x0);
 }
-&asciz("SHA1 block transform for x86, CRYPTOGAMS by <appro\@openssl.org>");
+&asciz("SHA1 block transform for x86, CRYPTOGAMS by <https://github.com/dot-asm>");
 
 &asm_finish();
+
+close STDOUT or die "error closing STDOUT: $!";

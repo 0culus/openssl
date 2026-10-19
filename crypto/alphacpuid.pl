@@ -1,4 +1,14 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2010-2025 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License 2.0 (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
+
+$output = pop and open STDOUT,">$output";
+
 print <<'___';
 .text
 
@@ -11,59 +21,6 @@ OPENSSL_cpuid_setup:
 	.prologue 0
 	ret	($26)
 .end	OPENSSL_cpuid_setup
-
-.globl	OPENSSL_wipe_cpu
-.ent	OPENSSL_wipe_cpu
-OPENSSL_wipe_cpu:
-	.frame	$30,0,$26
-	.prologue 0
-	clr	$1
-	clr	$2
-	clr	$3
-	clr	$4
-	clr	$5
-	clr	$6
-	clr	$7
-	clr	$8
-	clr	$16
-	clr	$17
-	clr	$18
-	clr	$19
-	clr	$20
-	clr	$21
-	clr	$22
-	clr	$23
-	clr	$24
-	clr	$25
-	clr	$27
-	clr	$at
-	clr	$29
-	fclr	$f0
-	fclr	$f1
-	fclr	$f10
-	fclr	$f11
-	fclr	$f12
-	fclr	$f13
-	fclr	$f14
-	fclr	$f15
-	fclr	$f16
-	fclr	$f17
-	fclr	$f18
-	fclr	$f19
-	fclr	$f20
-	fclr	$f21
-	fclr	$f22
-	fclr	$f23
-	fclr	$f24
-	fclr	$f25
-	fclr	$f26
-	fclr	$f27
-	fclr	$f28
-	fclr	$f29
-	fclr	$f30
-	mov	$sp,$0
-	ret	($26)
-.end	OPENSSL_wipe_cpu
 
 .globl	OPENSSL_atomic_add
 .ent	OPENSSL_atomic_add
@@ -123,6 +80,34 @@ OPENSSL_cleanse:
 	bne	$17,.Little
 .Ldone: ret	($26)
 .end	OPENSSL_cleanse
+
+.globl	CRYPTO_memcmp
+.ent	CRYPTO_memcmp
+CRYPTO_memcmp:
+	.frame	$30,0,$26
+	.prologue 0
+	xor	$0,$0,$0
+	beq	$18,.Lno_data
+
+	xor	$1,$1,$1
+	nop
+.Loop_cmp:
+	ldq_u	$2,0($16)
+	subq	$18,1,$18
+	ldq_u	$3,0($17)
+	extbl	$2,$16,$2
+	lda	$16,1($16)
+	extbl	$3,$17,$3
+	lda	$17,1($17)
+	xor	$3,$2,$2
+	or	$2,$0,$0
+	bne	$18,.Loop_cmp
+
+	subq	$31,$0,$0
+	srl	$0,63,$0
+.Lno_data:
+	ret	($26)
+.end	CRYPTO_memcmp
 ___
 {
 my ($out,$cnt,$max)=("\$16","\$17","\$18");
@@ -214,3 +199,5 @@ OPENSSL_instrument_bus2:
 .end	OPENSSL_instrument_bus2
 ___
 }
+
+close STDOUT or die "error closing STDOUT: $!";
